@@ -93,6 +93,12 @@ def compute_cosine_similarity(query: np.ndarray, matrix: np.ndarray) -> np.ndarr
     return np.dot(matrix, query) / denom
 
 
+def cosine_to_angle_degrees(cosine_values: np.ndarray) -> np.ndarray:
+    """Convert cosine similarity values into angles in degrees."""
+    clipped = np.clip(cosine_values, -1.0, 1.0)
+    return np.degrees(np.arccos(clipped))
+
+
 def compute_euclidean_distance(query: np.ndarray, matrix: np.ndarray) -> np.ndarray:
     """
     Compute Euclidean distance manually with NumPy.
@@ -125,21 +131,157 @@ def add_new_sentence(
     return record
 
 
-def _score_against_all(
-    query_embedding: np.ndarray,
+def compute_pair_metrics(
+    sentence_a: str,
+    sentence_b: str,
     all_sentences: list,
     all_embeddings: np.ndarray,
-    metric: str,
-) -> pd.DataFrame:
-    """Return sorted similarity/distance table for a query sentence."""
-    if metric == "Cosine similarity":
-        scores = compute_cosine_similarity(query_embedding, all_embeddings)
-        df = pd.DataFrame({"Sentence": all_sentences, "Cosine Similarity": scores})
-        return df.sort_values("Cosine Similarity", ascending=False).reset_index(drop=True)
+    all_points_3d: np.ndarray,
+) -> dict:
+    """Compute high-dimensional and projected 3D metrics for a chosen sentence pair."""
+    idx_a = all_sentences.index(sentence_a)
+    idx_b = all_sentences.index(sentence_b)
 
-    distances = compute_euclidean_distance(query_embedding, all_embeddings)
-    df = pd.DataFrame({"Sentence": all_sentences, "Euclidean Distance": distances})
-    return df.sort_values("Euclidean Distance", ascending=True).reset_index(drop=True)
+    embedding_a = all_embeddings[idx_a]
+    embedding_b = all_embeddings[idx_b]
+    point_a = all_points_3d[idx_a]
+    point_b = all_points_3d[idx_b]
+
+    cosine_value = float(compute_cosine_similarity(embedding_a, embedding_b.reshape(1, -1))[0])
+    euclidean_value = float(
+        compute_euclidean_distance(embedding_a, embedding_b.reshape(1, -1))[0]
+    )
+    angle_value = float(cosine_to_angle_degrees(np.array([cosine_value]))[0])
+
+    point_a_norm = np.linalg.norm(point_a)
+    point_b_norm = np.linalg.norm(point_b)
+    if point_a_norm < 1e-12 or point_b_norm < 1e-12:
+        projected_cosine = 0.0
+    else:
+        projected_cosine = float(
+            np.clip(np.dot(point_a / point_a_norm, point_b / point_b_norm), -1.0, 1.0)
+        )
+
+    return {
+        "sentence_a": sentence_a,
+        "sentence_b": sentence_b,
+        "cosine_similarity": cosine_value,
+        "angle_degrees": angle_value,
+        "euclidean_distance": euclidean_value,
+        "projected_angle_degrees": float(np.degrees(np.arccos(projected_cosine))),
+        "point_a": point_a,
+        "point_b": point_b,
+    }
+
+
+def _add_line_between_points(
+    fig: go.Figure,
+    start: np.ndarray,
+    end: np.ndarray,
+    label: str,
+    color: str = "#555555",
+) -> None:
+    """Add a straight 3D segment between two points."""
+    fig.add_trace(
+        go.Scatter3d(
+            x=[start[0], end[0]],
+            y=[start[1], end[1]],
+            z=[start[2], end[2]],
+            mode="lines",
+            name="Distance Link",
+            line=dict(color=color, width=4),
+            hovertemplate=f"{label}<extra></extra>",
+            showlegend=False,
+        )
+    )
+
+
+def _add_cosine_angle_wedge(
+    fig: go.Figure,
+    query_point: np.ndarray,
+    target_point: np.ndarray,
+    target_sentence: str,
+    show_query_vector: bool,
+) -> None:
+    """Draw two rays from the origin and an arc between them to show the angle."""
+    query_norm = np.linalg.norm(query_point)
+    target_norm = np.linalg.norm(target_point)
+    if query_norm < 1e-12 or target_norm < 1e-12:
+        return
+
+    query_unit = query_point / query_norm
+    target_unit = target_point / target_norm
+    orthogonal = target_unit - np.dot(target_unit, query_unit) * query_unit
+    orthogonal_norm = np.linalg.norm(orthogonal)
+    if orthogonal_norm < 1e-12:
+        return
+    orthogonal_unit = orthogonal / orthogonal_norm
+
+    projected_cosine = float(np.clip(np.dot(query_unit, target_unit), -1.0, 1.0))
+    angle_radians = np.arccos(projected_cosine)
+    angle_degrees = np.degrees(angle_radians)
+    arc_radius = min(query_norm, target_norm) * 0.32
+    arc_steps = np.linspace(0.0, angle_radians, 40)
+    arc_points = np.array(
+        [
+            arc_radius * (np.cos(step) * query_unit + np.sin(step) * orthogonal_unit)
+            for step in arc_steps
+        ]
+    )
+
+    origin = np.zeros(3)
+    if show_query_vector:
+        fig.add_trace(
+            go.Scatter3d(
+                x=[origin[0], query_point[0]],
+                y=[origin[1], query_point[1]],
+                z=[origin[2], query_point[2]],
+                mode="lines",
+                name="Selected Vector",
+                line=dict(color="#111111", width=6),
+                hovertemplate="Selected vector from origin<extra></extra>",
+            )
+        )
+        fig.add_trace(
+            go.Scatter3d(
+                x=[origin[0]],
+                y=[origin[1]],
+                z=[origin[2]],
+                mode="markers",
+                name="Origin",
+                marker=dict(size=5, color="#111111"),
+                hovertemplate="Origin<extra></extra>",
+            )
+        )
+
+    fig.add_trace(
+        go.Scatter3d(
+            x=[origin[0], target_point[0]],
+            y=[origin[1], target_point[1]],
+            z=[origin[2], target_point[2]],
+            mode="lines",
+            name="Comparison Vector",
+            line=dict(color=HIGHLIGHT_COLOR, width=5),
+            hovertemplate=f"{target_sentence}<br>Vector from origin<extra></extra>",
+            showlegend=False,
+        )
+    )
+    fig.add_trace(
+        go.Scatter3d(
+            x=arc_points[:, 0],
+            y=arc_points[:, 1],
+            z=arc_points[:, 2],
+            mode="lines",
+            name="Angle Wedge",
+            line=dict(color="#ef6c00", width=8),
+            hovertemplate=(
+                f"{target_sentence}<br>"
+                f"projected angle={angle_degrees:.2f} deg<br>"
+                f"projected cos={projected_cosine:.3f}<extra></extra>"
+            ),
+            showlegend=False,
+        )
+    )
 
 
 def build_plot(
@@ -147,15 +289,13 @@ def build_plot(
     original_clusters: list,
     original_points_3d: np.ndarray,
     inferred_records: list,
-    selected_sentence: str,
+    sentence_a: str,
+    sentence_b: str,
     metric: str,
-    show_lines: bool,
-    highlight_top2: bool,
     all_sentences: list,
-    all_embeddings: np.ndarray,
     all_points_3d: np.ndarray,
 ) -> go.Figure:
-    """Construct interactive 3D plot with optional similarity highlighting."""
+    """Construct interactive 3D plot for a chosen sentence pair."""
     fig = go.Figure()
 
     # Plot original points by semantic cluster.
@@ -195,86 +335,68 @@ def build_plot(
             )
         )
 
-    # Similarity overlays for the currently selected sentence.
-    if selected_sentence in all_sentences:
-        selected_idx = all_sentences.index(selected_sentence)
-        query_point = all_points_3d[selected_idx]
-        query_embedding = all_embeddings[selected_idx]
+    if sentence_a in all_sentences and sentence_b in all_sentences:
+        point_a = all_points_3d[all_sentences.index(sentence_a)]
+        point_b = all_points_3d[all_sentences.index(sentence_b)]
 
-        if metric == "Cosine similarity":
-            values = compute_cosine_similarity(query_embedding, all_embeddings)
-            # Exclude the selected sentence itself.
-            ranked = np.argsort(values)[::-1]
-            ranked = [i for i in ranked if i != selected_idx]
-        else:
-            values = compute_euclidean_distance(query_embedding, all_embeddings)
-            ranked = np.argsort(values)
-            ranked = [i for i in ranked if i != selected_idx]
-
-        top2 = ranked[:2]
-
-        # Mark selected sentence.
         fig.add_trace(
             go.Scatter3d(
-                x=[query_point[0]],
-                y=[query_point[1]],
-                z=[query_point[2]],
+                x=[point_a[0]],
+                y=[point_a[1]],
+                z=[point_a[2]],
                 mode="markers",
-                name="Selected",
+                name="Sentence A",
                 marker=dict(size=11, color="#111111", symbol="circle-open"),
-                text=[selected_sentence],
-                hovertemplate="<b>Selected:</b> %{text}<extra></extra>",
+                text=[sentence_a],
+                hovertemplate="<b>Sentence A:</b> %{text}<extra></extra>",
+            )
+        )
+        fig.add_trace(
+            go.Scatter3d(
+                x=[point_b[0]],
+                y=[point_b[1]],
+                z=[point_b[2]],
+                mode="markers",
+                name="Sentence B",
+                marker=dict(size=10, color=HIGHLIGHT_COLOR, symbol="x"),
+                text=[sentence_b],
+                hovertemplate="<b>Sentence B:</b> %{text}<extra></extra>",
             )
         )
 
-        if highlight_top2 and top2:
-            neighbor_points = all_points_3d[top2]
-            neighbor_text = [all_sentences[i] for i in top2]
-            fig.add_trace(
-                go.Scatter3d(
-                    x=neighbor_points[:, 0],
-                    y=neighbor_points[:, 1],
-                    z=neighbor_points[:, 2],
-                    mode="markers",
-                    name="Top 2 Matches",
-                    marker=dict(size=10, color=HIGHLIGHT_COLOR, symbol="cross"),
-                    text=neighbor_text,
-                    hovertemplate="<b>Match:</b> %{text}<extra></extra>",
-                )
+        if metric == "Cosine similarity":
+            _add_cosine_angle_wedge(
+                fig=fig,
+                query_point=point_a,
+                target_point=point_b,
+                target_sentence=sentence_b,
+                show_query_vector=True,
+            )
+        else:
+            _add_line_between_points(
+                fig=fig,
+                start=point_a,
+                end=point_b,
+                label=f"{sentence_a} vs {sentence_b}",
+                color="#1f77b4",
             )
 
-        if show_lines:
-            targets = top2 if highlight_top2 else ranked[:2]
-            for i in targets:
-                p = all_points_3d[i]
-                if metric == "Cosine similarity":
-                    label = f"cos={values[i]:.3f}"
-                else:
-                    label = f"dist={values[i]:.3f}"
-
-                fig.add_trace(
-                    go.Scatter3d(
-                        x=[query_point[0], p[0]],
-                        y=[query_point[1], p[1]],
-                        z=[query_point[2], p[2]],
-                        mode="lines",
-                        name="Similarity Link",
-                        line=dict(color="#555555", width=4),
-                        hovertemplate=f"{label}<extra></extra>",
-                        showlegend=False,
-                    )
-                )
-
     fig.update_layout(
-        title="3D Semantic Embedding Space (PCA Projection)",
         scene=dict(
             xaxis_title="PC1",
             yaxis_title="PC2",
             zaxis_title="PC3",
             bgcolor="#f8fafc",
         ),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-        margin=dict(l=0, r=0, b=0, t=40),
+        legend=dict(
+            orientation="h",
+            yanchor="top",
+            y=0.98,
+            xanchor="left",
+            x=0.02,
+            bgcolor="rgba(255,255,255,0.8)",
+        ),
+        margin=dict(l=0, r=0, b=0, t=70),
         height=680,
     )
 
@@ -282,9 +404,9 @@ def build_plot(
 
 
 def main() -> None:
-    st.set_page_config(page_title="Embedding Lab: Real Inference + PCA", layout="wide")
+    st.set_page_config(page_title="Interactive Embedding Lab", layout="wide")
 
-    st.title("Interactive Embedding Lab: Real Model, PCA, and Similarity")
+    st.title("Interactive Embedding Lab")
     st.caption(
         "Model: all-MiniLM-L6-v2 (384D) | PCA: 384D -> 3D | Live inference + similarity analysis"
     )
@@ -299,11 +421,6 @@ def main() -> None:
     with st.sidebar:
         st.subheader("Controls")
         metric = st.radio("Metric", ["Cosine similarity", "Euclidean distance"], index=0)
-        show_lines = st.toggle("Show connecting lines to most similar points", value=True)
-        highlight_top2 = st.toggle("Highlight top 2 similar sentences", value=True)
-
-        if st.button("Reset Inferred Sentences", width="stretch"):
-            st.session_state.inferred_records = []
 
         st.markdown("---")
         st.markdown(
@@ -339,12 +456,13 @@ def main() -> None:
             height=90,
         )
 
-        if st.button("Generate Embedding", type="primary", width="stretch"):
+        if st.button("Generate Embedding", type="primary", use_container_width=True):
             text = new_sentence.strip()
             if not text:
                 st.warning("Please enter a sentence.")
             else:
                 add_new_sentence(st.session_state.inferred_records, text, model, pca)
+                st.session_state.sentence_a = text
                 st.success("New sentence embedded, projected, and added to the plot.")
                 # Rebuild merged arrays after adding.
                 inferred = st.session_state.inferred_records
@@ -355,22 +473,65 @@ def main() -> None:
                 all_embeddings = np.vstack([base["embeddings"], inferred_embeddings])
                 all_points_3d = np.vstack([project_embeddings(pca, base["embeddings"]), inferred_points_3d])
 
-        target_sentence = st.selectbox(
-            "Select sentence for similarity analysis",
+        if st.session_state.get("sentence_a") not in all_sentences:
+            st.session_state.sentence_a = all_sentences[-1]
+
+        sentence_a = st.selectbox(
+            "Choose sentence A",
             options=all_sentences,
-            index=max(len(all_sentences) - 1, 0),
+            index=all_sentences.index(st.session_state.sentence_a),
+            key="sentence_a",
+        )
+        sentence_b_options = [sentence for sentence in all_sentences if sentence != sentence_a]
+
+        if st.session_state.get("sentence_b") not in sentence_b_options:
+            st.session_state.sentence_b = sentence_b_options[0]
+
+        sentence_b = st.selectbox(
+            "Choose sentence B",
+            options=sentence_b_options,
+            index=sentence_b_options.index(st.session_state.sentence_b),
+            key="sentence_b",
         )
 
-        selected_embedding = all_embeddings[all_sentences.index(target_sentence)]
-        scored_df = _score_against_all(selected_embedding, all_sentences, all_embeddings, metric)
+        pair_metrics = compute_pair_metrics(
+            sentence_a=sentence_a,
+            sentence_b=sentence_b,
+            all_sentences=all_sentences,
+            all_embeddings=all_embeddings,
+            all_points_3d=all_points_3d,
+        )
+        pair_df = pd.DataFrame(
+            [
+                {
+                    "Sentence A": pair_metrics["sentence_a"],
+                    "Sentence B": pair_metrics["sentence_b"],
+                    "Cosine Similarity": pair_metrics["cosine_similarity"],
+                    "Angle (degrees)": pair_metrics["angle_degrees"],
+                    "Euclidean Distance": pair_metrics["euclidean_distance"],
+                    "Projected 3D Angle": pair_metrics["projected_angle_degrees"],
+                }
+            ]
+        )
 
         st.subheader("Similarity Panel")
-        st.dataframe(scored_df, width="stretch", hide_index=True)
-
-        st.markdown("### Why cosine often works well")
+        st.caption(f"Visual emphasis: {metric}")
+        st.dataframe(pair_df, use_container_width=True, hide_index=True)
         st.write(
-            "Cosine similarity focuses on angular alignment between vectors, which usually reflects "
-            "semantic relatedness better than absolute distance in high-dimensional embedding spaces."
+            f"`{sentence_a}` vs `{sentence_b}` gives cosine "
+            f"`{pair_metrics['cosine_similarity']:.3f}`, angle "
+            f"`{pair_metrics['angle_degrees']:.2f} deg`, and distance "
+            f"`{pair_metrics['euclidean_distance']:.3f}`."
+        )
+        st.write(
+            f"The 3D plot currently shows a projected angle of "
+            f"`{pair_metrics['projected_angle_degrees']:.2f} deg` after PCA."
+        )
+
+        st.markdown("### How to read the comparison")
+        st.write(
+            "Cosine similarity focuses on angular alignment between vectors, while Euclidean distance "
+            "measures straight-line separation. Picking two explicit sentences makes that difference "
         )
 
     with col_plot:
@@ -380,15 +541,13 @@ def main() -> None:
             original_clusters=base["clusters"],
             original_points_3d=base_points_3d,
             inferred_records=st.session_state.inferred_records,
-            selected_sentence=target_sentence,
+            sentence_a=sentence_a,
+            sentence_b=sentence_b,
             metric=metric,
-            show_lines=show_lines,
-            highlight_top2=highlight_top2,
             all_sentences=all_sentences,
-            all_embeddings=all_embeddings,
             all_points_3d=all_points_3d,
         )
-        st.plotly_chart(fig, width="stretch")
+        st.plotly_chart(fig, use_container_width=True)
 
     explained_variance = pca.explained_variance_ratio_.sum() * 100
     st.info(
