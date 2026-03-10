@@ -531,7 +531,7 @@ def main() -> None:
         st.markdown("### How to read the comparison")
         st.write(
             "Cosine similarity focuses on angular alignment between vectors, while Euclidean distance "
-            "measures straight-line separation. Picking two explicit sentences makes that difference "
+            "measures straight-line separation."
         )
 
     with col_plot:
