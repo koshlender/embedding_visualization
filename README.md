@@ -14,5 +14,9 @@ This app helps students visualize how sentence embeddings behave in a 3D PCA pro
 ## Run
 
 ```bash
+pip install -r requirements.txt
+```
+
+```bash
 streamlit run app.py
 ```
